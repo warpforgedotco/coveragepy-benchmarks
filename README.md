@@ -51,8 +51,13 @@ subprocesses.  The slow, real-project, and memory workloads run weekly in
 [hyperfine](https://github.com/sharkdp/hyperfine): a warmup run, then five timed
 runs.  Each run is validated untimed afterward: every test passed, the same tests
 ran and skipped as in the first run, and coverage.py measured itself, subprocesses
-included.  Results are in the job summary and kept as JSON artifacts.  Shared
-runners are noisy, so read the spread alongside the mean.
+included.
+
+Each job also times the coverage.py pinned by the base commit (a pull request's
+base, or the previous commit on main) on the same machine, because shared
+runners differ from each other by far more than runs vary on one of them.  Only
+those same-job pairs are compared.  On pull requests the comparison is commented;
+results are also in the job summary and kept as JSON artifacts.
 
 ## Running locally
 
@@ -67,6 +72,8 @@ make test                           # check the workload builders, untimed
 make bench-self-prepare             # copy coveragepy/ and install its test requirements
 make bench-self                     # time its test suite under metacov (needs hyperfine)
 make bench-self SELF_CORES=sysmon SELF_RUNS=3
+make bench-self-prepare BASE_CHECKOUT=../coveragepy-old   # also prepare a base
+make bench-self SELF_VARIANTS=base,head                     # and time both
 ```
 
 To compare two coverage.py revisions, check each out in the submodule (or your

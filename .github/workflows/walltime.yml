@@ -2,12 +2,17 @@
 # For details: https://github.com/coveragepy/coveragepy/blob/main/NOTICE.txt
 
 # Wall-time measurement of coverage.py running its own test suite under
-# metacov, one core per job, timed with hyperfine.  On pull requests, the
-# results are commented, compared with the latest successful run on main.
+# metacov, one core per job, timed with hyperfine.
+#
+# Each job times two coverage.py revisions on the same machine: the one pinned
+# here ("head") and the one pinned by the base commit ("base": a pull request's
+# base, or the previous commit on main).  Shared runners differ from each other
+# by far more than a run varies on one of them, so only results from the same
+# job are compared.  On pull requests, the comparison is commented.
 #
 # CodSpeed's simulation mode (codspeed.yml) stays the regression signal for the
 # component benchmarks.  This is the end-to-end wall-clock view that simulation
-# can't give.  Shared runners are noisy, so hyperfine reports the spread too.
+# can't give.
 
 name: "Wall time"
 
@@ -21,6 +26,9 @@ on:
       runs:
         description: "Timed runs per core"
         default: "5"
+      base:
+        description: "Commit or branch here whose coverage.py to compare with (optional; the same coverage.py makes an A/A check)"
+        default: ""
 
 defaults:
   run:
@@ -66,6 +74,32 @@ jobs:
           }
           git -C coveragepy log -1 --format='coverage.py under test: %H %s' | tee -a "$GITHUB_STEP_SUMMARY"
 
+      - name: "Check out the coverage.py to compare with"
+        env:
+          BASE_REF: >-
+            ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha
+            || github.event_name == 'push' && github.event.before
+            || inputs.base }}
+        run: |
+          set -euo pipefail
+          variants="head"
+          if [[ -n "$BASE_REF" && ! "$BASE_REF" =~ ^0+$ ]]; then
+            git fetch --quiet --depth=1 origin "$BASE_REF"
+            base_pin=$(git rev-parse "FETCH_HEAD:coveragepy")
+            # A manual run compares even identical coverage.py: an A/A check of the noise.
+            if [[ "$base_pin" != "$(git rev-parse HEAD:coveragepy)" || "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+              git -C coveragepy fetch --quiet --depth=1 origin "$base_pin" ||
+                git -C coveragepy fetch --quiet origin "+refs/pull/*/head:refs/remotes/origin/pr/*"
+              git -C coveragepy worktree add --quiet --detach "$PWD/coveragepy-base" "$base_pin"
+              echo "BASE_CHECKOUT=$PWD/coveragepy-base" >> "$GITHUB_ENV"
+              variants="base,head"
+              git -C coveragepy-base log -1 --format='coverage.py to compare with: %H %s' | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              echo "coverage.py is the same as at $BASE_REF: nothing to compare with." | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+          echo "VARIANTS=$variants" >> "$GITHUB_ENV"
+
       - name: "Set up Python"
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -90,23 +124,26 @@ jobs:
           python -m pip install -e ./coveragepy
 
       - name: "Prepare coverage.py's test suite"
-        run: make bench-self-prepare PYTHON=python
+        run: make bench-self-prepare PYTHON=python BASE_CHECKOUT="${BASE_CHECKOUT:-}"
 
       - name: "Time the test suite under metacov"
         env:
           RUNS: ${{ inputs.runs || '5' }}
-        run: make bench-self PYTHON=python SELF_CORES=${{ matrix.core }} SELF_RUNS="$RUNS"
+        run: |
+          make bench-self PYTHON=python SELF_VARIANTS="$VARIANTS" \
+            SELF_CORES=${{ matrix.core }} SELF_RUNS="$RUNS"
 
       - name: "Show the test failures"
         if: failure()
         env:
           CORE: ${{ matrix.core }}
         run: |
-          log=".benchmarks/self/run-$CORE.log"
-          if [[ -f "$log" ]]; then
+          for log in .benchmarks/self/*/run-"$CORE".log; do
+            [[ -f "$log" ]] || continue
+            echo "== $log" | tee -a "$GITHUB_STEP_SUMMARY"
             grep -E "^(FAILED|ERROR) " "$log" | tee -a "$GITHUB_STEP_SUMMARY" || true
             tail -n 100 "$log"
-          fi
+          done
 
       - name: "Summarize"
         if: always()
@@ -127,8 +164,8 @@ jobs:
         with:
           name: failed-run-${{ matrix.core }}
           path: |
-            .benchmarks/self/run-*.log
-            .benchmarks/self/coveragepy/junit-*.xml
+            .benchmarks/self/*/run-*.log
+            .benchmarks/self/*/coveragepy/junit-*.xml
           include-hidden-files: true
           if-no-files-found: ignore
 
@@ -140,7 +177,6 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      actions: read         # Download main's artifacts for the baseline.
       pull-requests: write  # Post or update the comment.
     steps:
       - name: "Check out the repo"
@@ -159,30 +195,10 @@ jobs:
           pattern: benchmark-self-*
           path: results
 
-      - name: "Download main's results"
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          # main moves hourly, so compare with the commit this PR is based on.
-          # Fall back to main's latest results if that commit has none.
-          baseline_run() {
-            gh run list -R "$GITHUB_REPOSITORY" --workflow walltime.yml --branch main \
-              --event push --status success --limit 1 --json databaseId \
-              --jq '.[0].databaseId // empty' "$@"
-          }
-          run_id=$(baseline_run --commit "$BASE_SHA")
-          run_id=${run_id:-$(baseline_run)}
-          if [[ -n "$run_id" ]]; then
-            gh run download "$run_id" -R "$GITHUB_REPOSITORY" --pattern 'benchmark-self-*' --dir baseline
-            echo "BASELINE_URL=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run_id" >> "$GITHUB_ENV"
-          fi
-
       - name: "Write the comment"
         run: |
-          python -m benchmarks.walltime_comment results --baseline baseline \
-            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
-            --baseline-url "${BASELINE_URL:-}" > comment.md
+          python -m benchmarks.walltime_comment results \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" > comment.md
           cat comment.md >> "$GITHUB_STEP_SUMMARY"
 
       # Comments come from the wtfyd-agent GitHub App once its private key is

@@ -31,19 +31,22 @@ bench-prepare:			#- Prepare the Jinja2 workload (Python 3.14, needs network).
 bench-real:			#- Run the prepared Jinja2 workload.
 	$(BENCH) --bench-real -m "benchmark and real_project" $(ARGS)
 
-bench-self-prepare:		#- Prepare coverage.py's own test suite (Python 3.14, needs network).
-	$(PYTHON) -m benchmarks.self_suite prepare
-
 SELF = $(PYTHON) -m benchmarks.self_suite
+SELF_VARIANTS ?= head
 SELF_CORES ?= ctrace,pytrace,sysmon
 SELF_RUNS ?= 5
 
-bench-self:			#- Time coverage.py's own test suite under metacov, with hyperfine.
-	hyperfine --shell=none --warmup 1 --runs $(SELF_RUNS) -L core $(SELF_CORES) \
-		--setup '$(SELF) start {core}' --prepare '$(SELF) reset {core}' \
-		--conclude '$(SELF) validate {core}' --command-name 'metacov-{core}' \
+bench-self-prepare:		#- Prepare coverage.py's own test suite.  BASE_CHECKOUT=dir adds a base to compare.
+	$(SELF) prepare
+	$(if $(BASE_CHECKOUT),$(SELF) prepare --variant base --checkout $(BASE_CHECKOUT))
+
+bench-self:			#- Time it under metacov, with hyperfine.  SELF_VARIANTS=base,head to compare.
+	hyperfine --shell=none --warmup 1 --runs $(SELF_RUNS) \
+		-L variant $(SELF_VARIANTS) -L core $(SELF_CORES) \
+		--setup '$(SELF) start {variant} {core}' --prepare '$(SELF) reset {variant} {core}' \
+		--conclude '$(SELF) validate {variant} {core}' --command-name 'metacov-{variant}-{core}' \
 		--export-json benchmark-self.json --export-markdown benchmark-self.md $(ARGS) \
-		'$(SELF) run {core}'
+		'$(SELF) run {variant} {core}'
 
 codspeed:			#- Run the CodSpeed-tracked benchmarks locally.
 	$(BENCH) --codspeed -m "benchmark and not slow" $(ARGS)

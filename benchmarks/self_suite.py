@@ -12,6 +12,11 @@ igor.py's removal of the C extension never touch the real checkout.  It then
 builds an isolated environment from coverage.py's own pinned requirements,
 the same ones its tox environments use.
 
+Two variants can be prepared side by side: "head", the coverage.py under
+test, and "base", the one to compare it with.  Timing both in the same job, on
+the same machine, is what makes the comparison meaningful: shared CI runners
+differ from each other by far more than a run varies on one of them.
+
 hyperfine does the timing (see `make bench-self`): `start`, `reset`, and
 `validate` are its untimed setup, prepare, and conclude steps around `run`.
 
@@ -39,13 +44,24 @@ from benchmarks.target import PROJECT_ROOT, checkout_root
 
 PREPARED_ROOT = PROJECT_ROOT / ".benchmarks" / "self"
 CORES = ["ctrace", "pytrace", "sysmon"]
+VARIANTS = ["base", "head"]
 # coverage.py's tox.ini installs these for Python 3.14.
 REQUIREMENTS = ["pip.txt", "pytest.txt", "light-threads.txt"]
 # coverage.py has about 1650 tests; fewer means collection went wrong.
 MIN_TESTS = 1500
 
 
-def prepared_python(root: pathlib.Path = PREPARED_ROOT) -> pathlib.Path:
+def variant_root(variant: str) -> pathlib.Path:
+    """Where one variant's copy, environment, and run outputs live."""
+    return PREPARED_ROOT / variant
+
+
+def suite_root(variant: str) -> pathlib.Path:
+    """The copy of the checkout that the suite runs in."""
+    return variant_root(variant) / "coveragepy"
+
+
+def prepared_python(root: pathlib.Path) -> pathlib.Path:
     """The isolated interpreter created during preparation."""
     return root / "venv" / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
 
@@ -76,15 +92,15 @@ def source_hashes(root: pathlib.Path, names: list[str]) -> dict[str, str]:
     return {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in names}
 
 
-def verify_prepared(root: pathlib.Path = PREPARED_ROOT) -> dict[str, Any]:
-    """Fail explicitly instead of preparing inside a benchmark fixture."""
+def verify_prepared(root: pathlib.Path) -> dict[str, Any]:
+    """Fail explicitly instead of preparing inside a timed run."""
     manifest_path = root / "prepared.json"
     if not manifest_path.exists() or not prepared_python(root).exists():
         raise RuntimeError(
             "coverage.py's test suite is not prepared. Run make bench-self-prepare with Python 3.14."
         )
     manifest: dict[str, Any] = json.loads(manifest_path.read_text(encoding="utf-8"))
-    checkout = source_checkout()
+    checkout = pathlib.Path(manifest["coverage_checkout"])
     if source_hashes(checkout, checkout_files(checkout)) != manifest["source_hashes"]:
         raise RuntimeError(
             "The coverage.py checkout changed since preparation. Run make bench-self-prepare again."
@@ -92,11 +108,12 @@ def verify_prepared(root: pathlib.Path = PREPARED_ROOT) -> dict[str, Any]:
     return manifest
 
 
-def prepare(root: pathlib.Path = PREPARED_ROOT) -> None:
-    """Copy the checkout and install its test requirements before any measurements."""
+def prepare(variant: str, checkout: pathlib.Path | None) -> None:
+    """Copy a checkout and install its test requirements before any measurements."""
     if sys.version_info[:2] != (3, 14):
         raise RuntimeError("Prepare the self-test workload using Python 3.14.")
-    checkout = source_checkout()
+    root = variant_root(variant)
+    checkout = (checkout or source_checkout()).resolve()
     names = checkout_files(checkout)
     copy = root / "coveragepy"
     shutil.rmtree(copy, ignore_errors=True)
@@ -127,16 +144,16 @@ def prepare(root: pathlib.Path = PREPARED_ROOT) -> None:
         "source_hashes": source_hashes(checkout, names),
     }
     (root / "prepared.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    print(f"Prepared {copy}. Run make bench-self to time it.")
+    print(f"Prepared {copy} from {checkout}. Run make bench-self to time it.")
 
 
-def suite_env() -> dict[str, str]:
+def suite_env(variant: str) -> dict[str, str]:
     """What tox gives coverage.py's tests, with metacov turned on."""
     env = subprocess_env()
     # The suite needs its plugins: xdist, flaky, hypothesis.
     env.pop("PYTEST_DISABLE_PLUGIN_AUTOLOAD")
     # The tests run `coverage` and `python` by name, from the active environment.
-    env["PATH"] = str(prepared_python().parent) + os.pathsep + env["PATH"]
+    env["PATH"] = str(prepared_python(variant_root(variant)).parent) + os.pathsep + env["PATH"]
     env["COVERAGE_COVERAGE"] = "yes"
     # As coverage.py's own metacov CI does: no example database, which makes
     # the first draw slow enough to fail a health check on a loaded runner, and
@@ -147,27 +164,27 @@ def suite_env() -> dict[str, str]:
     return env
 
 
-def junit_path(core: str) -> pathlib.Path:
+def junit_path(variant: str, core: str) -> pathlib.Path:
     """Where a run's test results go."""
-    return PREPARED_ROOT / "coveragepy" / f"junit-{core}.xml"
+    return suite_root(variant) / f"junit-{core}.xml"
 
 
-def reference_path(core: str) -> pathlib.Path:
+def reference_path(variant: str, core: str) -> pathlib.Path:
     """The tests and outcomes of a sweep's first run, for comparing later runs."""
-    return PREPARED_ROOT / f"reference-{core}.json"
+    return variant_root(variant) / f"reference-{core}.json"
 
 
-def log_path(core: str) -> pathlib.Path:
+def log_path(variant: str, core: str) -> pathlib.Path:
     """The suite's output from the latest run: hyperfine itself discards it."""
-    return PREPARED_ROOT / f"run-{core}.log"
+    return variant_root(variant) / f"run-{core}.log"
 
 
-def start(core: str) -> None:
+def start(variant: str, core: str) -> None:
     """Before a core's runs: igor.py removes the C extension for the other cores."""
-    verify_prepared()
-    reference_path(core).unlink(missing_ok=True)
-    root = PREPARED_ROOT / "coveragepy"
-    python = str(prepared_python())
+    verify_prepared(variant_root(variant))
+    reference_path(variant, core).unlink(missing_ok=True)
+    root = suite_root(variant)
+    python = str(prepared_python(variant_root(variant)))
     env = subprocess_env()
     if core == "ctrace":
         # Not just any tracer.*: coverage/tracer.pyi is always there.
@@ -181,18 +198,18 @@ def start(core: str) -> None:
         run_subprocess([python, "igor.py", "clean_for_core", core], root, env)
 
 
-def reset(core: str) -> None:
+def reset(variant: str, core: str) -> None:
     """Before every run: no output from an earlier run can count for this one."""
-    junit_path(core).unlink(missing_ok=True)
-    log_path(core).unlink(missing_ok=True)
-    shutil.rmtree(PREPARED_ROOT / "coveragepy" / ".hypothesis", ignore_errors=True)
-    for data_file in (PREPARED_ROOT / "coveragepy").glob(".metacov*"):
+    junit_path(variant, core).unlink(missing_ok=True)
+    log_path(variant, core).unlink(missing_ok=True)
+    shutil.rmtree(suite_root(variant) / ".hypothesis", ignore_errors=True)
+    for data_file in suite_root(variant).glob(".metacov*"):
         data_file.unlink()
 
 
-def run(core: str) -> None:
+def run(variant: str, core: str) -> None:
     """The timed command: the whole test suite under metacov, as `make metacov` does."""
-    python = str(prepared_python())
+    python = str(prepared_python(variant_root(variant)))
     command = [
         python,
         "igor.py",
@@ -202,19 +219,19 @@ def run(core: str) -> None:
         "--cache-clear",
         "--hypothesis-seed=0",
         "--junitxml",
-        str(junit_path(core)),
+        str(junit_path(variant, core)),
     ]
-    with log_path(core).open("w", encoding="utf-8") as log:
+    with log_path(variant, core).open("w", encoding="utf-8") as log:
         status = subprocess.run(
             command,
-            cwd=PREPARED_ROOT / "coveragepy",
-            env=suite_env(),
+            cwd=suite_root(variant),
+            env=suite_env(variant),
             stdout=log,
             stderr=subprocess.STDOUT,
             check=False,
         ).returncode
     if status:
-        sys.exit(f"coverage.py's tests failed (exit {status}); see {log_path(core)}")
+        sys.exit(f"coverage.py's tests failed (exit {status}); see {log_path(variant, core)}")
 
 
 def suite_identities(junit: pathlib.Path) -> list[list[str]]:
@@ -262,35 +279,44 @@ def validate_metacov(root: pathlib.Path) -> None:
         raise RuntimeError(f"Too little measured: {len(source)} source files, {lines} lines")
 
 
-def validate(core: str) -> None:
+def validate(variant: str, core: str) -> None:
     """After every run, untimed: the same tests ran, passed, and were measured."""
-    identities = suite_identities(junit_path(core))
-    reference = reference_path(core)
+    identities = suite_identities(junit_path(variant, core))
+    reference = reference_path(variant, core)
     if reference.exists():
         if identities != json.loads(reference.read_text(encoding="utf-8")):
             raise RuntimeError(f"A different set of tests ran, or skipped, than in {reference}")
     else:
         reference.write_text(json.dumps(identities), encoding="utf-8")
-    validate_metacov(PREPARED_ROOT / "coveragepy")
+    validate_metacov(suite_root(variant))
 
 
 def main() -> None:
     """Command-line entry point: preparation, and the steps hyperfine runs."""
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("prepare", help="Copy the checkout and build the environment.")
-    commands.add_parser("verify", help="Check the prepared copy is still current.")
+    preparer = commands.add_parser("prepare", help="Copy a checkout and build its environment.")
+    preparer.add_argument("--variant", choices=VARIANTS, default="head")
+    preparer.add_argument(
+        "--checkout",
+        type=pathlib.Path,
+        help="The coverage.py checkout to copy (default: the one imported here).",
+    )
+    verifier = commands.add_parser("verify", help="Check a prepared copy is still current.")
+    verifier.add_argument("--variant", choices=VARIANTS, default="head")
     steps = {"start": start, "reset": reset, "run": run, "validate": validate}
     for name, step in steps.items():
-        commands.add_parser(name, help=step.__doc__).add_argument("core", choices=CORES)
+        step_parser = commands.add_parser(name, help=step.__doc__)
+        step_parser.add_argument("variant", choices=VARIANTS)
+        step_parser.add_argument("core", choices=CORES)
     args = parser.parse_args()
     if args.command == "prepare":
-        prepare()
+        prepare(args.variant, args.checkout)
     elif args.command == "verify":
-        verify_prepared()
+        verify_prepared(variant_root(args.variant))
         print("Prepared copy and environment verified.")
     else:
-        steps[args.command](args.core)
+        steps[args.command](args.variant, args.core)
 
 
 if __name__ == "__main__":

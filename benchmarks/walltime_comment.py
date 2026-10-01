@@ -3,11 +3,12 @@
 
 """Write the pull request comment for walltime.yml's hyperfine results.
 
-    python -m benchmarks.walltime_comment RESULTS_DIR [--baseline MAIN_DIR]
+    python -m benchmarks.walltime_comment RESULTS_DIR [--base-label TEXT]
 
-Each directory holds hyperfine --export-json files, one per core, possibly in
-subdirectories (as downloaded artifacts are).  The baseline is the latest
-successful run on main, when there is one.
+RESULTS_DIR holds hyperfine --export-json files, one per core, possibly in
+subdirectories (as downloaded artifacts are).  Each file has a "head" result
+and, when there was a different coverage.py to compare with, a "base" result
+timed in the same job, on the same machine.
 
 """
 
@@ -22,13 +23,14 @@ from dataclasses import dataclass
 # walltime.yml's matrix.  Not imported from self_suite: the commenting job
 # doesn't install coverage.py.
 CORES = ["ctrace", "pytrace", "sysmon"]
+
 # Find the comment again, to update it instead of adding another.
 MARKER = "<!-- walltime-self-suite -->"
 
 
 @dataclass
 class Timing:
-    """One core's hyperfine result, in seconds."""
+    """One variant's hyperfine result, in seconds."""
 
     mean: float
     stddev: float
@@ -38,9 +40,13 @@ class Timing:
         return f"{self.mean:.1f} s ± {self.stddev:.1f}"
 
 
-def load_timings(directory: pathlib.Path) -> dict[str, Timing]:
-    """hyperfine results by core, from every JSON export under `directory`."""
-    timings: dict[str, Timing] = {}
+# Core, then variant ("base" or "head").
+Timings = dict[str, dict[str, Timing]]
+
+
+def load_timings(directory: pathlib.Path) -> Timings:
+    """hyperfine results by core and variant, from every JSON export under `directory`."""
+    timings: Timings = {}
     for path in sorted(directory.rglob("*.json")):
         try:
             results = json.loads(path.read_text(encoding="utf-8"))["results"]
@@ -48,59 +54,64 @@ def load_timings(directory: pathlib.Path) -> dict[str, Timing]:
             # hyperfine stopped early, as it does when a run fails.
             continue
         for result in results:
-            times = result["times"]
-            timings[result["parameters"]["core"]] = Timing(
-                result["mean"], result["stddev"] or 0.0, len(times)
+            parameters = result["parameters"]
+            timings.setdefault(parameters["core"], {})[parameters["variant"]] = Timing(
+                result["mean"], result["stddev"] or 0.0, len(result["times"])
             )
     return timings
 
 
-def change(current: Timing, baseline: Timing) -> str:
+def change(head: Timing, base: Timing) -> str:
     """The relative change, and whether it stands out from run-to-run noise."""
-    delta = current.mean - baseline.mean
-    percent = 100 * delta / baseline.mean
-    # Two standard errors of the difference between the means.
-    noise = 2 * math.sqrt(current.stddev**2 / current.runs + baseline.stddev**2 / baseline.runs)
+    delta = head.mean - base.mean
+    percent = 100 * delta / base.mean
+    # Two standard errors of the difference between the means.  Only fair
+    # because both were timed in the same job, on the same machine.
+    noise = 2 * math.sqrt(head.stddev**2 / head.runs + base.stddev**2 / base.runs)
     if abs(delta) <= noise:
         return f"{percent:+.1f}% (within noise)"
     return f"**{percent:+.1f}%** ({'slower' if delta > 0 else 'faster'})"
 
 
-def comment(
-    current: dict[str, Timing], baseline: dict[str, Timing], run_url: str, baseline_url: str
-) -> str:
+def comment(timings: Timings, run_url: str, base_label: str) -> str:
     """The markdown comment body."""
+    compared = any("base" in variants for variants in timings.values())
     lines = [
         MARKER,
         "### Wall time: coverage.py's test suite under metacov",
         "",
     ]
-    if baseline:
-        lines += ["| Core | This PR | main | Change |", "| --- | --- | --- | --- |"]
+    if compared:
+        lines += ["| Core | Base | This PR | Change |", "| --- | --- | --- | --- |"]
     else:
         lines += ["| Core | This PR |", "| --- | --- |"]
+    failed = "failed, see the job log"
     for core in CORES:
-        now = str(current[core]) if core in current else "failed, see the job log"
-        if not baseline:
-            lines.append(f"| {core} | {now} |")
+        variants = timings.get(core, {})
+        head = str(variants["head"]) if "head" in variants else failed
+        if not compared:
+            lines.append(f"| {core} | {head} |")
             continue
-        then = str(baseline[core]) if core in baseline else "n/a"
-        delta = (
-            change(current[core], baseline[core]) if core in current and core in baseline else ""
-        )
-        lines.append(f"| {core} | {now} | {then} | {delta} |")
-    runs = sorted({t.runs for t in current.values()})
+        base = str(variants["base"]) if "base" in variants else failed
+        delta = change(variants["head"], variants["base"]) if len(variants) == 2 else ""
+        lines.append(f"| {core} | {base} | {head} | {delta} |")
+    runs = sorted({t.runs for variants in timings.values() for t in variants.values()})
     lines += [
         "",
         (
-            f"Mean ± standard deviation of {'/'.join(map(str, runs)) or '?'} runs after a warmup, "
-            "measured with hyperfine on a shared GitHub runner: expect a few percent of noise."
+            f"Mean ± standard deviation of {'/'.join(map(str, runs)) or '?'} "
+            f"run{'' if runs == [1] else 's'} after a warmup, "
+            "measured with hyperfine on a shared GitHub runner."
         ),
-        "",
-        f"[This run]({run_url})" + (f" · [main baseline]({baseline_url})" if baseline else ""),
     ]
-    if not baseline:
-        lines.append("No successful run on main yet to compare with.")
+    if compared:
+        lines.append(
+            f"Base is {base_label}, timed in the same job, on the same machine. "
+            "Compare a core only with itself: each core skips different tests."
+        )
+    else:
+        lines.append("This PR doesn't change coverage.py, so there is nothing to compare with.")
+    lines += ["", f"[This run]({run_url})"]
     return "\n".join(lines) + "\n"
 
 
@@ -108,12 +119,10 @@ def main() -> None:
     """Command-line entry point: print the comment."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("results", type=pathlib.Path)
-    parser.add_argument("--baseline", type=pathlib.Path)
     parser.add_argument("--run-url", default="")
-    parser.add_argument("--baseline-url", default="")
+    parser.add_argument("--base-label", default="the coverage.py pinned by this PR's base commit")
     args = parser.parse_args()
-    baseline = load_timings(args.baseline) if args.baseline and args.baseline.exists() else {}
-    print(comment(load_timings(args.results), baseline, args.run_url, args.baseline_url), end="")
+    print(comment(load_timings(args.results), args.run_url, args.base_label), end="")
 
 
 if __name__ == "__main__":
