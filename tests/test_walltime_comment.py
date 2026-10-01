@@ -34,6 +34,13 @@ def test_load_from_artifact_directories(tmp_path: pathlib.Path) -> None:
     assert timings["ctrace"].mean == 11 and timings["ctrace"].runs == 2
 
 
+def test_failed_run_leaves_unreadable_results(tmp_path: pathlib.Path) -> None:
+    write_hyperfine(tmp_path / "benchmark-self-sysmon" / "benchmark-self.json", "sysmon", [5, 5])
+    (tmp_path / "benchmark-self-ctrace").mkdir()
+    (tmp_path / "benchmark-self-ctrace" / "benchmark-self.json").write_text("", encoding="utf-8")
+    assert load_timings(tmp_path).keys() == {"sysmon"}
+
+
 def test_change_distinguishes_noise() -> None:
     assert change(Timing(101, 5, 5), Timing(100, 5, 5)) == "+1.0% (within noise)"
     assert change(Timing(90, 1, 5), Timing(100, 1, 5)) == "**-10.0%** (faster)"

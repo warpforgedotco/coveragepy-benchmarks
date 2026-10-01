@@ -42,7 +42,12 @@ def load_timings(directory: pathlib.Path) -> dict[str, Timing]:
     """hyperfine results by core, from every JSON export under `directory`."""
     timings: dict[str, Timing] = {}
     for path in sorted(directory.rglob("*.json")):
-        for result in json.loads(path.read_text(encoding="utf-8"))["results"]:
+        try:
+            results = json.loads(path.read_text(encoding="utf-8"))["results"]
+        except (ValueError, KeyError):
+            # hyperfine stopped early, as it does when a run fails.
+            continue
+        for result in results:
             times = result["times"]
             timings[result["parameters"]["core"]] = Timing(
                 result["mean"], result["stddev"] or 0.0, len(times)

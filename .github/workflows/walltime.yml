@@ -97,10 +97,21 @@ jobs:
           RUNS: ${{ inputs.runs || '5' }}
         run: make bench-self PYTHON=python SELF_CORES=${{ matrix.core }} SELF_RUNS="$RUNS"
 
+      - name: "Show the test failures"
+        if: failure()
+        env:
+          CORE: ${{ matrix.core }}
+        run: |
+          log=".benchmarks/self/run-$CORE.log"
+          if [[ -f "$log" ]]; then
+            grep -E "^(FAILED|ERROR) " "$log" | tee -a "$GITHUB_STEP_SUMMARY" || true
+            tail -n 100 "$log"
+          fi
+
       - name: "Summarize"
         if: always()
         run: |
-          if [[ -f benchmark-self.md ]]; then
+          if [[ -s benchmark-self.md ]]; then
             cat benchmark-self.md >> "$GITHUB_STEP_SUMMARY"
           fi
 
@@ -110,6 +121,16 @@ jobs:
           name: benchmark-self-${{ matrix.core }}
           path: benchmark-self.json
           if-no-files-found: error
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: failed-run-${{ matrix.core }}
+          path: |
+            .benchmarks/self/run-*.log
+            .benchmarks/self/coveragepy/junit-*.xml
+          include-hidden-files: true
+          if-no-files-found: ignore
 
   comment:
     name: "Comment the results"
@@ -157,11 +178,14 @@ jobs:
           cat comment.md >> "$GITHUB_STEP_SUMMARY"
 
       # Comments come from the wtfyd-agent GitHub App once its private key is
-      # configured, and from github-actions[bot] until then.
+      # configured, and from github-actions[bot] until then.  Pull requests from
+      # forks get neither the key nor a writable token: their results are only in
+      # the job summary.
       - name: "Get a wtfyd-agent token"
         id: app-token
-        if: env.HAS_APP_KEY == 'true'
+        if: env.FROM_FORK == 'false' && env.HAS_APP_KEY == 'true'
         env:
+          FROM_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
           HAS_APP_KEY: ${{ secrets.WTFYD_APP_PRIVATE_KEY != '' }}
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
@@ -170,6 +194,7 @@ jobs:
           permission-pull-requests: write
 
       - name: "Post or update the comment"
+        if: github.event.pull_request.head.repo.full_name == github.repository
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           AUTHOR: ${{ steps.app-token.outputs.token && 'wtfyd-agent[bot]' || 'github-actions[bot]' }}

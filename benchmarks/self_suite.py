@@ -29,6 +29,7 @@ import subprocess
 import sys
 import venv
 import xml.etree.ElementTree as ET
+from importlib.machinery import EXTENSION_SUFFIXES
 from typing import Any
 
 from coverage import CoverageData
@@ -152,6 +153,11 @@ def reference_path(core: str) -> pathlib.Path:
     return PREPARED_ROOT / f"reference-{core}.json"
 
 
+def log_path(core: str) -> pathlib.Path:
+    """The suite's output from the latest run: hyperfine itself discards it."""
+    return PREPARED_ROOT / f"run-{core}.log"
+
+
 def start(core: str) -> None:
     """Before a core's runs: igor.py removes the C extension for the other cores."""
     verify_prepared()
@@ -160,7 +166,10 @@ def start(core: str) -> None:
     python = str(prepared_python())
     env = subprocess_env()
     if core == "ctrace":
-        if not list((root / "coverage").glob("tracer.*")):
+        # Not just any tracer.*: coverage/tracer.pyi is always there.
+        if not any(
+            (root / "coverage" / f"tracer{suffix}").exists() for suffix in EXTENSION_SUFFIXES
+        ):
             run_subprocess(
                 [python, "setup.py", "--quiet", "build_ext", "--inplace"], root, env, timeout=600
             )
@@ -171,6 +180,7 @@ def start(core: str) -> None:
 def reset(core: str) -> None:
     """Before every run: no output from an earlier run can count for this one."""
     junit_path(core).unlink(missing_ok=True)
+    log_path(core).unlink(missing_ok=True)
     for data_file in (PREPARED_ROOT / "coveragepy").glob(".metacov*"):
         data_file.unlink()
 
@@ -178,7 +188,6 @@ def reset(core: str) -> None:
 def run(core: str) -> None:
     """The timed command: the whole test suite under metacov, as `make metacov` does."""
     python = str(prepared_python())
-    os.chdir(PREPARED_ROOT / "coveragepy")
     command = [
         python,
         "igor.py",
@@ -190,7 +199,17 @@ def run(core: str) -> None:
         "--junitxml",
         str(junit_path(core)),
     ]
-    os.execve(python, command, suite_env())
+    with log_path(core).open("w", encoding="utf-8") as log:
+        status = subprocess.run(
+            command,
+            cwd=PREPARED_ROOT / "coveragepy",
+            env=suite_env(),
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            check=False,
+        ).returncode
+    if status:
+        sys.exit(f"coverage.py's tests failed (exit {status}); see {log_path(core)}")
 
 
 def suite_identities(junit: pathlib.Path) -> list[list[str]]:
