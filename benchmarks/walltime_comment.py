@@ -96,7 +96,6 @@ def comment(
             f"Mean ± standard deviation of {'/'.join(map(str, runs)) or '?'} runs after a warmup, "
             "measured with hyperfine on a shared GitHub runner: expect a few percent of noise."
         ),
-        "Every run is checked afterward: all tests passed, and coverage.py measured itself.",
         "",
         f"[This run]({run_url})" + (f" · [main baseline]({baseline_url})" if baseline else ""),
     ]

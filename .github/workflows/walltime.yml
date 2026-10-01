@@ -159,12 +159,20 @@ jobs:
           pattern: benchmark-self-*
           path: results
 
-      - name: "Download main's latest results"
+      - name: "Download main's results"
         env:
           GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          run_id=$(gh run list -R "$GITHUB_REPOSITORY" --workflow walltime.yml --branch main \
-            --event push --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          # main moves hourly, so compare with the commit this PR is based on.
+          # Fall back to main's latest results if that commit has none.
+          baseline_run() {
+            gh run list -R "$GITHUB_REPOSITORY" --workflow walltime.yml --branch main \
+              --event push --status success --limit 1 --json databaseId \
+              --jq '.[0].databaseId // empty' "$@"
+          }
+          run_id=$(baseline_run --commit "$BASE_SHA")
+          run_id=${run_id:-$(baseline_run)}
           if [[ -n "$run_id" ]]; then
             gh run download "$run_id" -R "$GITHUB_REPOSITORY" --pattern 'benchmark-self-*' --dir baseline
             echo "BASELINE_URL=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run_id" >> "$GITHUB_ENV"
