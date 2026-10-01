@@ -1,5 +1,7 @@
 # coverage.py benchmarks
 
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/warpforgedotco/coveragepy-benchmarks?utm_source=badge)
+
 Performance benchmarks for [coverage.py](https://github.com/coveragepy/coveragepy):
 tracing with each core, dynamic contexts, data storage and combining, reporting
 in every format, tokenization, and a pinned real-project (Jinja2) test suite.
