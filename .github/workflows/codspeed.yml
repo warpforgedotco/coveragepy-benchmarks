@@ -1,0 +1,80 @@
+# Licensed under the Apache License: http://www.apache.org/licenses/LICENSE-2.0
+# For details: https://github.com/coveragepy/coveragepy/blob/main/NOTICE.txt
+
+# Continuous performance tracking with CodSpeed.
+#
+# CodSpeed keys results on commits of *this* repo.  The coverage.py under test
+# is the coveragepy/ submodule, and track-coverage.yml moves it forward one
+# upstream commit per push, so CodSpeed's history lines up with coverage.py's.
+
+name: "CodSpeed"
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: 1
+  FORCE_COLOR: 1
+
+permissions:
+  contents: read
+  id-token: write   # CodSpeed's tokenless upload uses OIDC.
+
+concurrency:
+  # Every main commit is one coverage.py revision: measure them all.
+  group: "${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}"
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  codspeed:
+    name: "Benchmarks"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: "Check out the repo"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Check out the coverage.py under test"
+        run: |
+          # The pin may be a coveragepy pull request head, which a plain
+          # submodule update can't always fetch by itself.
+          git submodule update --init --depth=1 coveragepy || {
+            git -C coveragepy fetch --depth=1 origin "$(git rev-parse HEAD:coveragepy)" ||
+            git -C coveragepy fetch origin "+refs/pull/*/head:refs/remotes/origin/pr/*"
+            git submodule update --init coveragepy
+          }
+          git -C coveragepy log -1 --format='coverage.py under test: %H %s' | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: "Set up Python"
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          # The newest version where sys.monitoring can measure branches, so
+          # that all three cores are exercised.
+          python-version: "3.14"
+
+      - name: "Install"
+        run: |
+          set -xe
+          python -m pip install --group codspeed
+          # Editable, so the C extension is built in place. Without it every
+          # ctrace benchmark would silently skip.
+          python -m pip install -e ./coveragepy
+          python -c "from coverage.core import CTRACER_FILE; assert CTRACER_FILE, 'no CTracer'"
+
+      - name: "Run the benchmarks"
+        uses: CodSpeedHQ/action@373d6868929f444bc08d901fd0eb0ad52a8875ea # v5.2.1
+        with:
+          mode: simulation
+          # Fresh-process and multiprocessing cases do their work in children.
+          simulation-track-subprocess: "true"
+          run: python -m pytest benchmarks --codspeed -m "benchmark and not slow"

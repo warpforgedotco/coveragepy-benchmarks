@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Benchmark results and the prepared real-project workload.
+.benchmarks/
+.codspeed/
+benchmark*.json
+benchmark*.txt

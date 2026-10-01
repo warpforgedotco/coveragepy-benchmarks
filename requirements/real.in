@@ -1,0 +1,10 @@
+# Licensed under the Apache License: http://www.apache.org/licenses/LICENSE-2.0
+# For details: https://github.com/coveragepy/coveragepy/blob/main/NOTICE.txt
+
+# Isolated environment for the pinned Jinja2 3.1.6 test suite.
+# Regenerate with `make upgrade`; that changes the workload identity, so prepare again.
+pytest
+# Jinja2 runs from its source tree, so its own runtime dependency is listed here.
+markupsafe
+babel
+trio

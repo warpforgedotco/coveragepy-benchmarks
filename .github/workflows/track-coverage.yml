@@ -1,0 +1,71 @@
+# Licensed under the Apache License: http://www.apache.org/licenses/LICENSE-2.0
+# For details: https://github.com/coveragepy/coveragepy/blob/main/NOTICE.txt
+
+# Move the coveragepy/ submodule along coverage.py's main branch.
+#
+# Each upstream commit becomes its own commit here, pushed separately, so that
+# codspeed.yml measures every coverage.py revision and a regression points at
+# exactly one upstream change.
+#
+# Pushes made with GITHUB_TOKEN don't trigger other workflows, so this needs a
+# BENCH_PUSH_TOKEN secret: a fine-grained token (or GitHub App token) with
+# contents: write on this repo.
+
+name: "Track coverage.py"
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      max_commits:
+        description: "Most upstream commits to take in one run"
+        default: "10"
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "${{ github.workflow }}"
+  cancel-in-progress: false
+
+jobs:
+  advance:
+    name: "Advance the submodule"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: "Check out the repo"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ secrets.BENCH_PUSH_TOKEN }}
+          submodules: true
+          fetch-depth: 0
+
+      - name: "Commit and push each new upstream commit"
+        env:
+          MAX_COMMITS: ${{ inputs.max_commits || '10' }}
+        run: |
+          set -euo pipefail
+          git config user.name "coveragepy-benchmarks[bot]"
+          git config user.email "coveragepy-benchmarks@users.noreply.github.com"
+          git -C coveragepy fetch --quiet origin main
+          current=$(git rev-parse HEAD:coveragepy)
+          # First-parent, so merged branches arrive as one step, as they did upstream.
+          mapfile -t pending < <(
+            git -C coveragepy rev-list --first-parent --reverse "$current..origin/main" | head -n "$MAX_COMMITS"
+          )
+          echo "${#pending[@]} new coverage.py commit(s)" | tee -a "$GITHUB_STEP_SUMMARY"
+          for sha in "${pending[@]}"; do
+            git -C coveragepy checkout --quiet "$sha"
+            subject=$(git -C coveragepy log -1 --format=%s "$sha")
+            git add coveragepy
+            git commit --quiet -m "coverage.py ${sha:0:10}: $subject" -m "https://github.com/coveragepy/coveragepy/commit/$sha"
+            # One push per commit: a multi-commit push only runs CodSpeed on its tip.
+            git push --quiet origin HEAD:main
+            echo "- [${sha:0:10}](https://github.com/coveragepy/coveragepy/commit/$sha) $subject" >> "$GITHUB_STEP_SUMMARY"
+          done

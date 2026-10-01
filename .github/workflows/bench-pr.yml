@@ -1,0 +1,61 @@
+# Licensed under the Apache License: http://www.apache.org/licenses/LICENSE-2.0
+# For details: https://github.com/coveragepy/coveragepy/blob/main/NOTICE.txt
+
+# Benchmark a coverage.py pull request against coverage.py's main branch.
+#
+# Opens (or updates) a pull request here that moves the coveragepy/ submodule to
+# the coverage.py PR's head.  codspeed.yml runs on it, and CodSpeed comments
+# with the comparison against this repo's main, which tracks coverage.py main.
+
+name: "Benchmark a coverage.py PR"
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "coveragepy/coveragepy pull request number"
+        required: true
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+jobs:
+  open:
+    name: "Open a benchmark PR"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: "Check out the repo"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # GITHUB_TOKEN-created pull requests wouldn't trigger codspeed.yml.
+          token: ${{ secrets.BENCH_PUSH_TOKEN }}
+          submodules: true
+
+      - name: "Point the submodule at the PR"
+        env:
+          PR: ${{ inputs.pr }}
+          GH_TOKEN: ${{ secrets.BENCH_PUSH_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$PR" =~ ^[0-9]+$ ]] || { echo "Not a PR number: $PR"; exit 1; }
+          title=$(gh pr view "$PR" -R coveragepy/coveragepy --json title --jq .title)
+          git -C coveragepy fetch --quiet origin "pull/$PR/head"
+          sha=$(git -C coveragepy rev-parse FETCH_HEAD)
+          git -C coveragepy checkout --quiet "$sha"
+          branch="coverage-pr-$PR"
+          git config user.name "coveragepy-benchmarks[bot]"
+          git config user.email "coveragepy-benchmarks@users.noreply.github.com"
+          git checkout --quiet -B "$branch"
+          git add coveragepy
+          git commit --quiet -m "coverage.py PR #$PR at ${sha:0:10}: $title"
+          git push --force --quiet origin "$branch"
+          if ! gh pr view "$branch" --json number >/dev/null 2>&1; then
+            gh pr create --head "$branch" --base main \
+              --title "Benchmark coverage.py #$PR: $title" \
+              --body "Measures https://github.com/coveragepy/coveragepy/pull/$PR at $sha against coverage.py main. Close without merging."
+          fi

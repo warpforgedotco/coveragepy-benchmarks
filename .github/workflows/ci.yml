@@ -1,0 +1,122 @@
+# Licensed under the Apache License: http://www.apache.org/licenses/LICENSE-2.0
+# For details: https://github.com/coveragepy/coveragepy/blob/main/NOTICE.txt
+
+# Correctness of the workloads themselves.  Timing lives in codspeed.yml.
+
+name: "CI"
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  schedule:
+    - cron: "23 4 * * 0"
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: 1
+  FORCE_COLOR: 1
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  workloads:
+    name: "Workloads (${{ matrix.python }}, ${{ matrix.os }})"
+    if: github.event_name != 'schedule'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: "3.10"
+            os: ubuntu-latest
+          - python: "3.14"
+            os: ubuntu-latest
+          - python: "3.15"
+            os: ubuntu-latest
+          - python: "3.14"
+            os: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: true
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+          allow-prereleases: true
+      - name: "Install"
+        run: |
+          python -m pip install --group bench
+          python -m pip install -e ./coveragepy
+      - name: "Check the workloads"
+        run: make test
+      - name: "Run every component workload once"
+        run: make bench-smoke
+
+  lint:
+    name: "Lint"
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: true
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - run: |
+          python -m pip install --group lint
+          python -m pip install -e ./coveragepy
+          make lint
+
+  extended:
+    # Too slow and too subprocess-heavy for every push: the real Jinja2 test
+    # suite, large-project reports, multiprocessing, and peak memory.
+    name: "Real project and memory"
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: true
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: "Prepare immutable inputs and dependencies"
+        run: |
+          python -m pip install --group bench
+          python -m pip install -e ./coveragepy
+          make bench-prepare
+      - name: "Measure extended workloads"
+        run: |
+          python -m pytest benchmarks --bench-real -m "benchmark and slow" \
+            --benchmark-json=benchmark-extended.json \
+            --benchmark-min-rounds=10 --benchmark-max-time=3
+      - name: "Summarize"
+        if: always()
+        run: |
+          if [[ -f benchmark-extended.json ]]; then
+            python -m benchmarks.summarize benchmark-extended.json >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: benchmark-extended-results
+          path: benchmark-extended.json
+          if-no-files-found: error

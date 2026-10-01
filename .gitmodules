@@ -1,0 +1,3 @@
+[submodule "coveragepy"]
+	path = coveragepy
+	url = https://github.com/coveragepy/coveragepy.git
