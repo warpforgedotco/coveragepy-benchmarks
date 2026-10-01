@@ -1,0 +1,219 @@
+# Licensed under the Apache License: http://www.apache.org/licenses/LICENSE-2.0
+# For details: https://github.com/coveragepy/coveragepy/blob/main/NOTICE.txt
+
+# Wall-time measurement of coverage.py running its own test suite under
+# metacov, one core per job, timed with hyperfine.  On pull requests, the
+# results are commented, compared with the latest successful run on main.
+#
+# CodSpeed's simulation mode (codspeed.yml) stays the regression signal for the
+# component benchmarks.  This is the end-to-end wall-clock view that simulation
+# can't give.  Shared runners are noisy, so hyperfine reports the spread too.
+
+name: "Wall time"
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: "Timed runs per core"
+        default: "5"
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: 1
+  FORCE_COLOR: 1
+  HYPERFINE_VERSION: "1.20.0"
+  HYPERFINE_SHA256: "63ad53934062118f5b0be11785e0bb1603d4b91667d1921f2fd8df9a8712040a"
+
+permissions:
+  contents: read
+
+concurrency:
+  # Every main commit is one coverage.py revision: measure them all.
+  group: "${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}"
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  metacov:
+    name: "Self-test suite (${{ matrix.core }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        core: [ctrace, pytrace, sysmon]
+    steps:
+      - name: "Check out the repo"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Check out the coverage.py under test"
+        run: |
+          # The pin may be a coveragepy pull request head, which a plain
+          # submodule update can't always fetch by itself.
+          git submodule update --init --depth=1 coveragepy || {
+            git -C coveragepy fetch --depth=1 origin "$(git rev-parse HEAD:coveragepy)" ||
+            git -C coveragepy fetch origin "+refs/pull/*/head:refs/remotes/origin/pr/*"
+            git submodule update --init coveragepy
+          }
+          git -C coveragepy log -1 --format='coverage.py under test: %H %s' | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: "Set up Python"
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          # The newest version where sys.monitoring can measure branches, so
+          # that metacov runs with all three cores.
+          python-version: "3.14"
+
+      - name: "Install hyperfine"
+        run: |
+          set -xe
+          name="hyperfine-v${HYPERFINE_VERSION}-x86_64-unknown-linux-gnu"
+          curl -sSfLO "https://github.com/sharkdp/hyperfine/releases/download/v${HYPERFINE_VERSION}/${name}.tar.gz"
+          echo "${HYPERFINE_SHA256}  ${name}.tar.gz" | sha256sum --check
+          tar xzf "${name}.tar.gz"
+          sudo install "${name}/hyperfine" /usr/local/bin/
+          hyperfine --version
+
+      - name: "Install"
+        run: |
+          set -xe
+          python -m pip install --group bench
+          python -m pip install -e ./coveragepy
+
+      - name: "Prepare coverage.py's test suite"
+        run: make bench-self-prepare PYTHON=python
+
+      - name: "Time the test suite under metacov"
+        env:
+          RUNS: ${{ inputs.runs || '5' }}
+        run: make bench-self PYTHON=python SELF_CORES=${{ matrix.core }} SELF_RUNS="$RUNS"
+
+      - name: "Show the test failures"
+        if: failure()
+        env:
+          CORE: ${{ matrix.core }}
+        run: |
+          log=".benchmarks/self/run-$CORE.log"
+          if [[ -f "$log" ]]; then
+            grep -E "^(FAILED|ERROR) " "$log" | tee -a "$GITHUB_STEP_SUMMARY" || true
+            tail -n 100 "$log"
+          fi
+
+      - name: "Summarize"
+        if: always()
+        run: |
+          if [[ -s benchmark-self.md ]]; then
+            cat benchmark-self.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: benchmark-self-${{ matrix.core }}
+          path: benchmark-self.json
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: failed-run-${{ matrix.core }}
+          path: |
+            .benchmarks/self/run-*.log
+            .benchmarks/self/coveragepy/junit-*.xml
+          include-hidden-files: true
+          if-no-files-found: ignore
+
+  comment:
+    name: "Comment the results"
+    needs: metacov
+    if: always() && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read         # Download main's artifacts for the baseline.
+      pull-requests: write  # Post or update the comment.
+    steps:
+      - name: "Check out the repo"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Set up Python"
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: "Download this run's results"
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: benchmark-self-*
+          path: results
+
+      - name: "Download main's results"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          # main moves hourly, so compare with the commit this PR is based on.
+          # Fall back to main's latest results if that commit has none.
+          baseline_run() {
+            gh run list -R "$GITHUB_REPOSITORY" --workflow walltime.yml --branch main \
+              --event push --status success --limit 1 --json databaseId \
+              --jq '.[0].databaseId // empty' "$@"
+          }
+          run_id=$(baseline_run --commit "$BASE_SHA")
+          run_id=${run_id:-$(baseline_run)}
+          if [[ -n "$run_id" ]]; then
+            gh run download "$run_id" -R "$GITHUB_REPOSITORY" --pattern 'benchmark-self-*' --dir baseline
+            echo "BASELINE_URL=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run_id" >> "$GITHUB_ENV"
+          fi
+
+      - name: "Write the comment"
+        run: |
+          python -m benchmarks.walltime_comment results --baseline baseline \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --baseline-url "${BASELINE_URL:-}" > comment.md
+          cat comment.md >> "$GITHUB_STEP_SUMMARY"
+
+      # Comments come from the wtfyd-agent GitHub App once its private key is
+      # configured, and from github-actions[bot] until then.  Pull requests from
+      # forks get neither the key nor a writable token: their results are only in
+      # the job summary.
+      - name: "Get a wtfyd-agent token"
+        id: app-token
+        if: env.FROM_FORK == 'false' && env.HAS_APP_KEY == 'true'
+        env:
+          FROM_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+          HAS_APP_KEY: ${{ secrets.WTFYD_APP_PRIVATE_KEY != '' }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: 4938050
+          private-key: ${{ secrets.WTFYD_APP_PRIVATE_KEY }}
+          permission-pull-requests: write
+
+      - name: "Post or update the comment"
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          AUTHOR: ${{ steps.app-token.outputs.token && 'wtfyd-agent[bot]' || 'github-actions[bot]' }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          # Only our own comment can be edited.
+          comment_id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+            --jq '.[] | select(.user.login == env.AUTHOR)
+                      | select(.body | startswith("<!-- walltime-self-suite -->")) | .id' | head -1)
+          if [[ -n "$comment_id" ]]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$comment_id" -F body=@comment.md
+          else
+            gh pr comment "$PR" -R "$GITHUB_REPOSITORY" --body-file comment.md
+          fi
