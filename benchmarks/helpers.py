@@ -469,7 +469,9 @@ def run_coverage_subprocess(
     )
 
 
-def run_subprocess(args: list[str], workspace: pathlib.Path, env: dict[str, str]) -> str:
+def run_subprocess(
+    args: list[str], workspace: pathlib.Path, env: dict[str, str], timeout: float = 180
+) -> str:
     """Run a child, keeping its diagnostics available if it fails."""
     result = subprocess.run(
         args,
@@ -480,7 +482,7 @@ def run_subprocess(args: list[str], workspace: pathlib.Path, env: dict[str, str]
         encoding="utf-8",
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        timeout=180,
+        timeout=timeout,
     )
     if result.returncode:
         raise RuntimeError(f"Command failed ({result.returncode}): {args!r}\n{result.stdout}")

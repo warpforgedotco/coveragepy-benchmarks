@@ -46,6 +46,14 @@ CodSpeed runs the component benchmarks in simulation mode, following
 subprocesses.  The slow, real-project, and memory workloads run weekly in
 `ci.yml` with pytest-benchmark and are kept as JSON artifacts.
 
+**`walltime.yml`** times coverage.py running its own test suite under metacov
+(as `make metacov` does), one job per core, with
+[hyperfine](https://github.com/sharkdp/hyperfine): a warmup run, then five timed
+runs.  Each run is validated untimed afterward: every test passed, the same tests
+ran and skipped as in the first run, and coverage.py measured itself, subprocesses
+included.  Results are in the job summary and kept as JSON artifacts.  Shared
+runners are noisy, so read the spread alongside the mean.
+
 ## Running locally
 
 ```bash
@@ -56,6 +64,9 @@ make bench ARGS='--benchmark-compare'
 make codspeed                       # the CodSpeed set, via pytest-codspeed
 make bench-smoke                    # run every workload once and check its work
 make test                           # check the workload builders, untimed
+make bench-self-prepare             # copy coveragepy/ and install its test requirements
+make bench-self                     # time its test suite under metacov (needs hyperfine)
+make bench-self SELF_CORES=sysmon SELF_RUNS=3
 ```
 
 To compare two coverage.py revisions, check each out in the submodule (or your

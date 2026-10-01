@@ -160,3 +160,9 @@ class BenchmarkWorkloadsTest:
 
         with pytest.raises(RuntimeError, match="make bench-prepare"):
             verify_prepared(tmp_path)
+
+    def test_missing_self_preparation_is_actionable(self, tmp_path: pathlib.Path) -> None:
+        from benchmarks.self_suite import verify_prepared
+
+        with pytest.raises(RuntimeError, match="make bench-self-prepare"):
+            verify_prepared(tmp_path)
