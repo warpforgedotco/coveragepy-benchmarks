@@ -35,7 +35,7 @@ def _html_setup(workspace: pathlib.Path) -> Any:
     return setup
 
 
-@pytest.mark.benchmark(group="analysis", warmup=True)
+@pytest.mark.benchmark(group="analysis")
 def test_analysis2_all_files(
     bench: Benchmark,
     report_cov: Coverage,

@@ -24,6 +24,8 @@ testpaths = ["benchmarks", "tests"]
 filterwarnings = [
     # The tokenizer stress corpus deliberately contains invalid escapes.
     "ignore:.*invalid escape sequence:SyntaxWarning",
+    # CodSpeed's simulation takes one deterministic sample; --bench-rounds is for pytest-benchmark.
+    "ignore:.*ignores rounds and iterations settings:UserWarning",
 ]
 markers = [
     "benchmark: a performance benchmark",
