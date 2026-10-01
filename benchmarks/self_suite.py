@@ -138,6 +138,10 @@ def suite_env() -> dict[str, str]:
     # The tests run `coverage` and `python` by name, from the active environment.
     env["PATH"] = str(prepared_python().parent) + os.pathsep + env["PATH"]
     env["COVERAGE_COVERAGE"] = "yes"
+    # As coverage.py's own metacov CI does: no example database, which makes
+    # the first draw slow enough to fail a health check on a loaded runner, and
+    # would let one run replay examples saved by an earlier one.
+    env["HYPOTHESIS_PROFILE"] = "ci"
     env["PYTHONWARNDEFAULTENCODING"] = "1"
     env["PYTHON_COLORS"] = "0"
     return env
@@ -181,6 +185,7 @@ def reset(core: str) -> None:
     """Before every run: no output from an earlier run can count for this one."""
     junit_path(core).unlink(missing_ok=True)
     log_path(core).unlink(missing_ok=True)
+    shutil.rmtree(PREPARED_ROOT / "coveragepy" / ".hypothesis", ignore_errors=True)
     for data_file in (PREPARED_ROOT / "coveragepy").glob(".metacov*"):
         data_file.unlink()
 
